@@ -41,7 +41,7 @@ async def signup(user: User):
     except HTTPException as e:
         raise e
     except Exception as e:
-        print("🔥 Internal Server Error:", e)
+        print(" Internal Server Error:", e)
         raise HTTPException(status_code=500, detail="Something went wrong")
 
 @router.post("/login")
@@ -61,7 +61,7 @@ async def login(user: User):
     except HTTPException as e:
         raise e
     except Exception as e:
-        print("🔥 Login Error:", e)
+        print(" Login Error:", e)
         raise HTTPException(status_code=500, detail="Something went wrong")
 
 # Route for social login (Google, Facebook, Apple)
