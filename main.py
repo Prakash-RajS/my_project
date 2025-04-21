@@ -27,6 +27,13 @@ async def serve_index():
     print(f"Serving index from: {index_path}")  # Print to check file path
     return FileResponse(index_path)
 
+#use it for login.html 
+@app.get("/login")
+async def serve_login():
+    login_path = os.path.join("fastapi_app", "frontend", "login.html")
+    print(f"Serving login page from: {login_path}")  # Check the file path
+    return FileResponse(login_path)
+
 
 # Mount static files for frontend assets (e.g., CSS, JS, images)
 #app.mount("/static", StaticFiles(directory="fastapi_app/frontend/static"), name="static")
@@ -71,4 +78,3 @@ def login_apple():
             f"&scope=openid profile email"
             f"&connection=apple"
     )
-
