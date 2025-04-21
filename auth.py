@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, status, Request
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
 
 
 from starlette.concurrency import run_in_threadpool
@@ -113,12 +113,19 @@ async def auth_callback(request: Request):
     if not email:
         raise HTTPException(status_code=400, detail="User email not found")
 
-    # Step 3: Thread-safe DB handling
+
     def handle_user():
         user = UserData.objects.filter(email=email).first()
         if user:
-            return {"message": f"User already exists, logged in as {email}"}
-        UserData.objects.create(email=email, provider=provider, password=None)
-        return {"message": f"User logged in successfully via {provider}"}
+            # Login → Redirect to home (simulated)
+            return RedirectResponse(url="/home", status_code=302)
+        else:
+            #  Not in DB → Create user and treat as signup
+            UserData.objects.create(email=email, provider=provider, password=None)
+            return RedirectResponse(url="/home", status_code=302)
 
     return await run_in_threadpool(handle_user)
+
+@router.get("/home")
+async def home():
+    return {"message": "Welcome to the Home Page!"}
