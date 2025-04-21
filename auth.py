@@ -1,10 +1,25 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Request
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+
+
 from starlette.concurrency import run_in_threadpool
 import os
 import django
+import requests
+from urllib.parse import urlencode
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN")
+AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID")
+AUTH0_CLIENT_SECRET = os.getenv("AUTH0_CLIENT_SECRET")
+AUTH0_CALLBACK_URL = os.getenv("AUTH0_CALLBACK_URL")
+
+
 
 # Setup Django
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "my_project.settings")
@@ -41,7 +56,7 @@ async def signup(user: User):
     except HTTPException as e:
         raise e
     except Exception as e:
-        print(" Internal Server Error:", e)
+        print("Internal Server Error:", e)
         raise HTTPException(status_code=500, detail="Something went wrong")
 
 @router.post("/login")
@@ -64,17 +79,46 @@ async def login(user: User):
         print(" Login Error:", e)
         raise HTTPException(status_code=500, detail="Something went wrong")
 
-# Route for social login (Google, Facebook, Apple)
-@router.post("/social-login")
-async def social_login(provider: str, user: User):
-    try:
-        social_user = UserSocialAuth.objects.get(provider=provider, user__email=user.email)
-    except UserSocialAuth.DoesNotExist:
-        raise HTTPException(status_code=404, detail=f"Social account not found for {provider}")
+@router.get("/callback")
+async def auth_callback(request: Request):
+    code = request.query_params.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="Authorization code not found")
 
-    # Check if social account exists, and perform necessary actions (like creating or logging in user)
-    user_obj = UserData.objects.get(email=user.email)
-    if not user_obj:
-        raise HTTPException(status_code=404, detail="User not found")
+    # Step 1: Exchange code for access token
+    token_url = f"https://{AUTH0_DOMAIN}/oauth/token"
+    data = {
+        'grant_type': 'authorization_code',
+        'client_id': AUTH0_CLIENT_ID,
+        'client_secret': AUTH0_CLIENT_SECRET,
+        'code': code,
+        'redirect_uri': AUTH0_CALLBACK_URL,
+    }
 
-    return {"message": f"{provider} login successful"}
+    response = requests.post(token_url, data=urlencode(data), headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    token_info = response.json()
+    access_token = token_info.get('access_token')
+
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Token exchange failed")
+
+    # Step 2: Get user info
+    user_info_url = f"https://{AUTH0_DOMAIN}/userinfo"
+    user_info_response = requests.get(user_info_url, headers={'Authorization': f'Bearer {access_token}'})
+    user_info = user_info_response.json()
+
+    email = user_info.get('email')
+    provider = user_info.get('sub').split('|')[0]
+
+    if not email:
+        raise HTTPException(status_code=400, detail="User email not found")
+
+    # Step 3: Thread-safe DB handling
+    def handle_user():
+        user = UserData.objects.filter(email=email).first()
+        if user:
+            return {"message": f"User already exists, logged in as {email}"}
+        UserData.objects.create(email=email, provider=provider, password=None)
+        return {"message": f"User logged in successfully via {provider}"}
+
+    return await run_in_threadpool(handle_user)
