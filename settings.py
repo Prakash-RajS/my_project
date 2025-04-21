@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import os
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'my_project.settings') #profile page 
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -98,6 +99,9 @@ USE_I18N = True
 USE_TZ = True
 
 STATIC_URL = '/static/'
+
+MEDIA_URL = '/media/' #used for profile pic
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 # Social Authentication Settings
 AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID")
