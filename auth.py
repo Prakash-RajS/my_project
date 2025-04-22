@@ -2,6 +2,8 @@ from fastapi import APIRouter, HTTPException, status, Request
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse
+from fastapi.logger import logger
+from asgiref.sync import sync_to_async
 
 
 from starlette.concurrency import run_in_threadpool
@@ -78,6 +80,7 @@ async def login(user: User):
     except Exception as e:
         print(" Login Error:", e)
         raise HTTPException(status_code=500, detail="Something went wrong")
+    
 
 @router.get("/callback")
 async def auth_callback(request: Request):
@@ -95,37 +98,73 @@ async def auth_callback(request: Request):
         'redirect_uri': AUTH0_CALLBACK_URL,
     }
 
-    response = requests.post(token_url, data=urlencode(data), headers={'Content-Type': 'application/x-www-form-urlencoded'})
+    response = requests.post(
+        token_url,
+        data=urlencode(data),
+        headers={'Content-Type': 'application/x-www-form-urlencoded'}
+    )
     token_info = response.json()
     access_token = token_info.get('access_token')
-
     if not access_token:
         raise HTTPException(status_code=400, detail="Token exchange failed")
 
-    # Step 2: Get user info
+    # Step 2: Get user info using access token
     user_info_url = f"https://{AUTH0_DOMAIN}/userinfo"
-    user_info_response = requests.get(user_info_url, headers={'Authorization': f'Bearer {access_token}'})
+    user_info_response = requests.get(
+        user_info_url,
+        headers={'Authorization': f'Bearer {access_token}'}
+    )
     user_info = user_info_response.json()
 
-    email = user_info.get('email')
-    provider = user_info.get('sub').split('|')[0]
+    # Extract data from Auth0 response
+    email = user_info.get('email')  # Google will give email
+    sub = user_info.get('sub')      # e.g. google-oauth2|12345
+    provider = sub.split("|")[0]    # google-oauth2 / facebook / apple
+    user_id = sub                   # full unique ID for fb/apple
+    first_name = user_info.get('given_name') or user_info.get('name') or "User"
 
-    if not email:
+    # Email is only required for Google
+    if provider == "google-oauth2" and not email:
         raise HTTPException(status_code=400, detail="User email not found")
 
+    # Step 3: Route to provider-specific handler
+    if provider == "google-oauth2":
+        return await handle_google_signup_login(email, first_name)
+    elif provider == "facebook":
+        return await handle_facebook_signup_login(user_id, first_name)
+    elif provider == "apple":
+        return await handle_apple_signup_login(user_id)
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported provider")
 
-    def handle_user():
-        user = UserData.objects.filter(email=email).first()
-        if user:
-            # Login → Redirect to home (simulated)
-            return RedirectResponse(url="/home", status_code=302)
-        else:
-            #  Not in DB → Create user and treat as signup
-            UserData.objects.create(email=email, provider=provider, password=None)
-            return RedirectResponse(url="/home", status_code=302)
 
-    return await run_in_threadpool(handle_user)
+async def handle_google_signup_login(email, first_name):
+    # Handle Google login/signup logic
+    user = await sync_to_async(UserData.objects.filter(email=email).first)()
+    if user:
+        return RedirectResponse(url="/profile", status_code=302)
+    else:
+        # Store new user data in the database
+        await sync_to_async(UserData.objects.create)(email=email, first_name=first_name, provider="google")
+        return RedirectResponse(url="/profile", status_code=302)
 
-@router.get("/home")
-async def home():
-    return {"message": "Welcome to the Home Page!"}
+async def handle_facebook_signup_login(user_id, first_name):
+    # Handle Facebook login/signup logic
+    user = await sync_to_async(UserData.objects.filter(userid=user_id).first)()
+    if user:
+        return RedirectResponse(url="/profile", status_code=302)
+    else:
+        # Store new user data in the database
+        await sync_to_async(UserData.objects.create)(userid=user_id, first_name=first_name, provider="facebook")
+        return RedirectResponse(url="/profile", status_code=302)
+
+async def handle_apple_signup_login(user_id):
+    user = await sync_to_async(UserData.objects.filter(userid=user_id).first)()
+    if user:
+        return RedirectResponse(url="/profile", status_code=302)
+    else:
+        await sync_to_async(UserData.objects.create)(
+            userid=user_id,
+            provider="apple"
+        )
+        return RedirectResponse(url="/profile", status_code=302)
