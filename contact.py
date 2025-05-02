@@ -1,6 +1,5 @@
-
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, constr, Field
 from fastapi_app.django_setup import django_setup
 from appln.models import ContactUs
 import smtplib
@@ -17,7 +16,8 @@ class ContactForm(BaseModel):
     email: EmailStr
     contact_number: str
     subject: str
-    message: str
+    message: constr(max_length=500)
+    source: str = Field(default="contact_us") 
 
 
 @router.post("/contact")
@@ -29,7 +29,9 @@ def submit_contact_form(data: ContactForm):
         email=data.email,
         contact_number=data.contact_number,
         subject=data.subject,
-        message=data.message
+        message=data.message,
+        source=data.source
+        
     )
     
     # Send confirmation email using Mailtrap
@@ -66,5 +68,3 @@ def submit_contact_form(data: ContactForm):
         send_sms(data.contact_number, data.first_name)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
