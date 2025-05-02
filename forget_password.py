@@ -9,25 +9,22 @@ from fastapi_app.config import settings
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('otp.log'),  # Log to file
-        logging.StreamHandler()          # Log to console
-    ]
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
+
 
 otp_storage: Dict[str, dict] = {}
 
-#google 
-"""class OTPManager:
+
+class OTPManager:
     @staticmethod
     def send_otp_email(email: str, otp: str) -> bool:
        # Send OTP using Gmail or Mailtrap based on settings
         try:
             msg = MIMEText(
-                f"Hi,\n\nYour OTP is: {otp}\nValid for {settings.OTP_EXPIRE_MINUTES} minutes.\n\n- Team"
+                f"Hi, \n\nYour one-time password (OTP) is:  {otp},\n\nThis code is valid for the next {settings.OTP_EXPIRE_MINUTES} minutes. Please do not share it with anyone.\n\nIf you didn’t request this OTP, please ignore this message or contact our support team.\n\n-Thanks,\n\n-The Stackly.Ai Team"
             )
-            msg['Subject'] = '🔐 Password Reset OTP'
+            msg['Subject'] = 'Thanks for reaching out to Stackly.Ai! '
             msg['From'] = settings.EMAIL_FROM
             msg['To'] = email
 
@@ -41,29 +38,6 @@ otp_storage: Dict[str, dict] = {}
 
         except Exception as e:
             logging.error(f"Failed to send OTP email to {email}: {str(e)}")
-            return False"""
-
-class OTPManager:
-    @staticmethod
-    def _send_via_mailtrap(email: str, otp: str) -> bool:
-        """Send OTP using Mailtrap's SMTP"""
-        try:
-            msg = MIMEText(
-                f"Your OTP is: {otp}\nValid for {settings.OTP_EXPIRE_MINUTES} minutes."
-            )
-            msg['Subject'] = 'Password Reset Code'
-            msg['From'] = settings.EMAIL_FROM
-            msg['To'] = email
-
-            with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-                server.login(settings.SMTP_USER, settings.SMTP_PASS)
-                server.send_message(msg)
-            
-            logging.info(f"OTP sent to {email} via Mailtrap")
-            return True
-            
-        except Exception as e:
-            logging.error(f"Mailtrap send failed: {str(e)}")
             return False
 
     @staticmethod
@@ -83,10 +57,10 @@ class OTPManager:
         }
 
         # Attempt Mailtrap delivery
-        if not OTPManager._send_via_mailtrap(email, otp):
+        if not OTPManager.send_otp_email(email, otp):
             # Fallback to console if Mailtrap fails
             logging.warning(f"OTP for {email}: {otp} (Fallback to console)")
-            print(f"\n⚠️ OTP for {email}: {otp}\n")
+            print(f"\n OTP for {email}: {otp}\n")
 
         return otp
 
