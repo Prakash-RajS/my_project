@@ -137,50 +137,64 @@ async def auth_callback(request: Request):
     provider = sub.split('|')[0]
     user_id = sub.split('|')[1] if '|' in sub else sub
     email = user_info.get('email')
-    first_name = user_info.get('given_name') or user_info.get('name') or "User"
+    first_name = user_info.get('given_name') or user_info.get('name') or ""
     last_name = user_info.get('family_name') or ""
-
 
     if provider == "google-oauth2":
         if not email:
-            raise HTTPException(status_code=400, detail="Google email not found")
-        return await handle_provider_signup_login(email=email, first_name=first_name,last_name=last_name, provider="google", user_id=None)
+            raise HTTPException(status_code=400, detail="Google login failed: email not provided")
+        return await handle_provider_signup_login(email=email, first_name=first_name, last_name=last_name, provider="google", user_id=None)
 
     elif provider == "facebook":
-        return await handle_provider_signup_login(email=None, first_name=first_name,last_name=last_name, provider="facebook", user_id=user_id)
+        if not user_id or not first_name:
+            raise HTTPException(status_code=400, detail="Facebook login missing required info")
+        return await handle_provider_signup_login(email=None, first_name=first_name, last_name=last_name, provider="facebook", user_id=user_id)
 
     elif provider == "apple":
-        # Apple may not provide real email/name
-        #fallback_email = email or "" #f"{user_id}@apple.com"
-        #fallback_name = first_name or "AppleUser"
-        #return await handle_provider_signup_login(email=fallback_email, first_name= None,last_name="", provider="apple", user_id=user_id)
-        return await handle_provider_signup_login(email=None, first_name= None,last_name="", provider="apple", user_id=user_id)
+        if not user_id:
+            raise HTTPException(status_code=400, detail="Apple login missing user ID")
+        return await handle_provider_signup_login(email=None, first_name=None, last_name=None, provider="apple", user_id=user_id)
+
     else:
         raise HTTPException(status_code=400, detail="Unsupported provider")
 
-async def handle_provider_signup_login(email: str, first_name: str,last_name:str,provider: str, user_id: str = None):
+
+async def handle_provider_signup_login(email: str, first_name: str, last_name: str, provider: str, user_id: str = None):
     try:
         @sync_to_async
         def process_user():
             with transaction.atomic():
-                fallback_email = email or "" #f"{user_id}@{provider}.com"
-                user, created = UserData.objects.get_or_create(
-                    email=fallback_email,
-                    defaults={
-                        "first_name": first_name or "",
-                        "last_name" : last_name or "",
-                        "password": hash_password(str(user_id or fallback_email)),
-                        "userid": user_id,
-                        "provider": provider
-                    }
-                )
+                if provider == "google":
+                    if not email:
+                        raise ValueError("Email required for Google login")
+                    user, created = UserData.objects.get_or_create(
+                        email=email,
+                        defaults={
+                            "first_name": first_name or "",
+                            "last_name": last_name or "",
+                            "password": hash_password(email),
+                            "userid": None,
+                            "provider": provider,
+                        }
+                    )
+                else:  # Facebook and Apple
+                    user, created = UserData.objects.get_or_create(
+                        userid=user_id,
+                        provider=provider,
+                        defaults={
+                            "first_name": first_name or "",
+                            "last_name": last_name or "",
+                            "password": hash_password(user_id),
+                            "email": None,  #  Use None instead of empty string
+                        }
+                    )
+
                 if created:
                     UserSubscription.objects.create(
                         user=user,
-                        email=user.email,
+                        email=user.email or "",
                         userid=user.userid,
-                        first_name=user.first_name,
-                        last_name=user.last_name,
+                        name=" ".join(filter(None, [user.first_name, user.last_name])).strip(),
                         current_plan='basic',
                         pricing=0.00,
                         plan_expiring_date=timezone.now() + relativedelta(months=1),
@@ -192,9 +206,10 @@ async def handle_provider_signup_login(email: str, first_name: str,last_name:str
                 return user, created
 
         user, created = await process_user()
-        token = jwt.encode({"sub": user.email}, SECRET_KEY, algorithm=ALGORITHM)
+        token = jwt.encode({"sub": user.email or user.userid}, SECRET_KEY, algorithm=ALGORITHM)
+
         response = JSONResponse({
-            "message": "Login successful" if not created else "Signup successful",
+            "message": "Signup successful" if created else "Login successful",
             "access_token": token
         })
         response.set_cookie(key="access_token", value=token, httponly=True, secure=True)
@@ -205,22 +220,24 @@ async def handle_provider_signup_login(email: str, first_name: str,last_name:str
         raise HTTPException(status_code=500, detail=f"{provider} authentication failed")
 
 
-
+# Manual routes for testing without Auth0 redirects
 @router.post("/google_signup_login")
-async def google_signup(email: str, first_name: str, last_name:str):
-    return await handle_provider_signup_login(email, first_name,last_name, "google")
+async def google_signup(email: str, first_name: str, last_name: str):
+    return await handle_provider_signup_login(email, first_name, last_name, provider="google")
 
 
 @router.post("/facebook_signup_login")
-async def facebook_signup(userid: str, first_name: str, last_name:str):
-    return await handle_provider_signup_login(None, first_name,last_name, "facebook", userid)
+async def facebook_signup(userid: str, first_name: str, last_name: str):
+    return await handle_provider_signup_login(None, first_name, last_name, provider="facebook", user_id=userid)
+
 
 @router.post("/apple_signup_login")
 async def apple_signup(userid: str):
-    return await handle_provider_signup_login(None, None,None, provider="apple", user_id=userid)
+    return await handle_provider_signup_login(None, None, None, provider="apple", user_id=userid)
 
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+
 
 
 def verify_token(token: str = Depends(oauth2_scheme)):
