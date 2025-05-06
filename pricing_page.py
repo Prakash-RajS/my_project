@@ -1,58 +1,144 @@
 #fastapi_app/pricing_page.py 
 
 #fastapi_app\pricing_page.py
-"""from django.utils import timezone
+#good working file 
+"""from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from django.utils import timezone
 from dateutil.relativedelta import relativedelta
-from appln.models import UserSubscription, UserData
+from appln.models import UserData, UserSubscription, BillingHistory  # Import BillingHistory
 from asgiref.sync import sync_to_async
+from jose import JWTError, jwt
+import os
+from uuid import uuid4
 
-@sync_to_async
-def create_subscription_for_user(user: UserData,  email=None, userid=None, first_name=None, last_name =None):
-    # Check if subscription already exists
-    subscription, created = UserSubscription.objects.get_or_create(user=user)
-    
-    # If it's a new subscription, we set the initial plan details
-    if created:
-        # Default plan and pricing
-        subscription.current_plan = 'basic'  # Default plan
-        subscription.pricing = 0  # Example pricing for 'basic' plan
-        
-        # Set plan expiration date and renews_on (next month)
-        subscription.plan_expiring_date = timezone.now() + relativedelta(months=1)
-        subscription.renews_on = timezone.now().date() + relativedelta(months=1)
-        
-        # Set default credits
-        subscription.total_credits = 10  # Default credits
-        subscription.used_credits = 0
-        subscription.total_credits_used_all_time = 0
-        if email:
-            subscription.email = email
-        if userid:
-            subscription.userid = userid
-        if first_name:
-            subscription.first_name = first_name
-        
-        # Save the subscription details
-        subscription.save()
-    else:
-        # Optional: update the subscription if needed (e.g., if the plan changes)
-        if subscription.current_plan != 'basic':  # Only if plan is not 'basic'
-            subscription.pricing = get_price_for_plan(subscription.current_plan)
-            subscription.plan_expiring_date = timezone.now() + relativedelta(months=1)
-            subscription.renews_on = timezone.now().date() + relativedelta(months=1)
-            subscription.save()
 
-    return subscription
+from dotenv import load_dotenv
 
-def get_price_for_plan(plan):
+# Load environment variables
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM")
+
+router = APIRouter()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# Pricing mapping and utility functions remain the same
+def get_price_for_plan(plan: str, duration: str) -> float:
     pricing = {
-        "basic": 0.00,
-        "silver": 10.00,
-        "gold": 20.00
+        "silver": {"monthly": 10.00, "yearly": 100.00},
+        "gold": {"monthly": 20.00, "yearly": 200.00},
+        "platinum": {"monthly": 30.00, "yearly": 300.00},
+        "basic": {"monthly": 0.00, "yearly": 0.00},
     }
-    if plan not in pricing:
-        raise ValueError(f"Unknown plan: {plan}")
-    return pricing[plan]"""
+    if plan not in pricing or duration not in pricing[plan]:
+        raise ValueError(f"Invalid plan or duration: {plan}, {duration}")
+    return pricing[plan][duration]
+
+# Members count mapping
+def get_total_members(plan: str) -> int:
+    return {
+        "basic": 1,
+        "silver": 1,
+        "gold": 5,
+        "platinum": 7
+    }.get(plan, 1)
+
+# Credits mapping
+def get_credits_for_plan(plan: str) -> int:
+    plan = plan.lower()
+    return {
+        "basic": 10,
+        "silver": 20,
+        "gold": 50,
+        "platinum": 100
+    }.get(plan, 0)
+
+# Update subscription and create a billing record
+@sync_to_async
+def create_subscription_and_billing(user, new_plan: str, new_duration: str):
+    # Update subscription details
+    subscription = UserSubscription.objects.get(user=user)
+    subscription.current_plan = new_plan
+    subscription.duration = new_duration
+    subscription.start_date = timezone.now().date()
+    subscription.total_members = get_total_members(new_plan)
+    subscription.pricing = get_price_for_plan(new_plan, new_duration)
+    subscription.total_credits = get_credits_for_plan(new_plan)
+
+    # Set renew and expiry dates
+    if new_duration == 'monthly':
+        subscription.renews_on = timezone.now().date() + relativedelta(months=1)
+        subscription.plan_expiring_date = timezone.now() + relativedelta(months=1)
+    elif new_duration == 'yearly':
+        subscription.renews_on = timezone.now().date() + relativedelta(years=1)
+        subscription.plan_expiring_date = timezone.now() + relativedelta(years=1)
+    else:
+        subscription.renews_on = None
+        subscription.plan_expiring_date = None
+
+    subscription.save()
+
+    # Create a billing history entry
+    billing = BillingHistory(
+    user=user,
+    plan_name=new_plan,  #  correct field name
+    amount=subscription.pricing,
+    payment_method="credit_card",  # You can pass this dynamically
+    status="paid",  # Set a default or handle logic as needed
+    invoice_id=str(uuid4()),  # Generate a unique invoice ID
+    paid_on=timezone.now().date()  # If your model uses DateField
+    )
+    billing.save()
+
+    return subscription, billing
+
+
+# Extract the current user from the OAuth2 token
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("email")
+        userid = payload.get("userid")
+        return email, userid
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+@router.post("/update-subscription/")
+async def update_subscription(new_plan: str, new_duration: str, email: str = None, userid: str = None):
+    if not (email or userid):
+        raise HTTPException(status_code=400, detail="Email or UserID required for testing")
+
+    try:
+        user = await sync_to_async(UserData.objects.get)(email=email) if email else await sync_to_async(UserData.objects.get)(userid=userid)
+    except UserData.DoesNotExist:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Update the user's subscription and create billing history
+    subscription, billing = await create_subscription_and_billing(user, new_plan, new_duration)
+
+    return {
+        "message": "Subscription and billing record updated successfully",
+        "subscription": {
+            "plan": subscription.current_plan,
+            "duration": subscription.duration,
+            "pricing": subscription.pricing,
+            "renews_on": subscription.renews_on,
+            "plan_expiring_date": subscription.plan_expiring_date
+        },
+        "billing": {
+            "amount": billing.amount,
+            "payment_method": billing.payment_method,
+            "paid_on": billing.paid_on,
+            "status": billing.status,
+            "invoice_id": billing.invoice_id
+}
+        
+    }
+
+
+"""
 
 """from fastapi import APIRouter, Depends, HTTPException
 from django.utils import timezone
