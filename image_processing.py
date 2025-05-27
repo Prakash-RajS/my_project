@@ -4,12 +4,13 @@ import requests
 import base64
 import random
 import time
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 from PIL import Image
 import io
 import hashlib
+from typing import List
 
 load_dotenv()
 
@@ -23,6 +24,25 @@ HEADERS = {
     "Authorization": f"Bearer {STABILITY_API_KEY}",
 }
 
+# Design variations with different styles
+DESIGN_VARIANTS = [
+    {
+        "name": "Modern Luxury",
+        "prompt": "A luxurious modern bedroom with king-size bed, floor-to-ceiling windows, contemporary furniture, warm ambient lighting, high-end materials, 4K realistic interior design",
+        "negative_prompt": "blurry, low quality, distorted, cluttered, outdated furniture, poor lighting"
+    },
+    {
+        "name": "Minimalist Scandinavian",
+        "prompt": "Scandinavian minimalist bedroom with light wood furniture, cozy textiles, functional design, natural light, hygge aesthetic",
+        "negative_prompt": "ornate, dark colors, heavy drapes, cluttered"
+    },
+    {
+        "name": "Industrial Chic",
+        "prompt": "Industrial loft bedroom with exposed brick walls, metal accents, open space, modern lighting fixtures, urban chic design",
+        "negative_prompt": "traditional, floral patterns, rustic, country style"
+    }
+]
+
 # Allowed dimensions for SDXL
 ALLOWED_DIMENSIONS = [
     (1024, 1024), (1152, 896), (1216, 832), (1344, 768), (1536, 640),
@@ -35,37 +55,51 @@ def resize_to_allowed_dimensions(image_path):
         width, height = img.size
         aspect = width / height
         
-        # Find closest allowed dimensions
         closest = min(ALLOWED_DIMENSIONS, 
                      key=lambda dim: abs((dim[0]/dim[1]) - aspect))
         
-        # Resize with high-quality downsampling
         img = img.resize(closest, Image.LANCZOS)
-        
-        # Convert to bytes
         img_bytes = io.BytesIO()
         img.save(img_bytes, format="PNG", quality=95)
         img_bytes.seek(0)
         
         return img_bytes, closest
 
-def file_hash(filepath):
-    """Generate MD5 hash of a file to verify transformation"""
-    with open(filepath, "rb") as f:
-        return hashlib.md5(f.read()).hexdigest()
+def generate_design(image_bytes: io.BytesIO, design_config: dict):
+    """Generate a single design variation"""
+    payload = {
+        "init_image_mode": "IMAGE_STRENGTH",
+        "image_strength": 0.35,
+        "text_prompts[0][text]": design_config["prompt"],
+        "text_prompts[0][weight]": 1.5,
+        "text_prompts[1][text]": design_config["negative_prompt"],
+        "text_prompts[1][weight]": -1.0,
+        "cfg_scale": 10,
+        "samples": 1,
+        "steps": 50,
+        "seed": random.randint(0, 10000),
+        "style_preset": "photographic"
+    }
 
-@router.post("/transform-to-modern-design/",
-             summary="Transform room image to modern design",
-             description="Upload a room photo to generate an AI-enhanced modern interior design")
-async def transform_to_modern_design(
-    room_image: UploadFile = File(..., description="Original room photo to transform"),
-    style_prompt: str = Form(
-        "A luxurious modern bedroom with king-size bed, floor-to-ceiling windows, contemporary furniture, warm ambient lighting, high-end materials, 4K realistic interior design",
-        description="Detailed style description"
+    response = requests.post(
+        STABILITY_API_URL,
+        headers=HEADERS,
+        files={"init_image": ("input.png", image_bytes, "image/png")},
+        data=payload,
+        timeout=30
     )
+
+    if response.status_code == 200:
+        return response.json()["artifacts"][0]
+    raise Exception(f"API Error: {response.text}")
+
+@router.post("/generate-designs")
+async def generate_designs(
+    room_image: UploadFile = File(..., description="Room image to transform"),
+    num_designs: int = Form(1, description="Number of designs to generate (1-3)", ge=1, le=3)
 ):
     try:
-        # 1. Save original image
+        # 1. Save and process original image
         os.makedirs("uploads", exist_ok=True)
         os.makedirs("generated", exist_ok=True)
         
@@ -73,87 +107,54 @@ async def transform_to_modern_design(
         with open(input_path, "wb") as f:
             shutil.copyfileobj(room_image.file, f)
 
-        # 2. Resize to API requirements
         resized_img, new_size = resize_to_allowed_dimensions(input_path)
+        input_hash = file_hash(input_path)
 
-        # 3. Enhanced prompt engineering
-        enhanced_prompt = (
-            f"{style_prompt}, ultra-realistic, architectural visualization, "
-            "professional interior design, magazine quality, 8K resolution"
-        )
+        # 2. Generate requested number of designs
+        results = []
+        timestamp = int(time.time())
         
-        negative_prompt = (
-            "blurry, low quality, distorted, cluttered, outdated furniture, "
-            "poor lighting, empty room, unrealistic proportions"
-        )
-
-        # 4. Prepare API request
-        files = {"init_image": (room_image.filename, resized_img, "image/png")}
+        # Select random design variants (without repeating)
+        selected_variants = random.sample(DESIGN_VARIANTS, num_designs)
         
-        payload = {
-            "init_image_mode": "IMAGE_STRENGTH",
-            "image_strength": 0.35,  # Strong transformation
-            "text_prompts[0][text]": enhanced_prompt,
-            "text_prompts[0][weight]": 1.5,  # Stronger weight
-            "text_prompts[1][text]": negative_prompt,
-            "text_prompts[1][weight]": -1.0,
-            "cfg_scale": 10,  # Strong prompt adherence
-            "samples": 1,
-            "steps": 50,  # More refinement
-            "seed": random.randint(0, 10000),
-            "style_preset": "photographic"
-        }
-
-        # 5. Call Stability AI API
-        response = requests.post(
-            STABILITY_API_URL,
-            headers=HEADERS,
-            files=files,
-            data=payload,
-            timeout=30
-        )
-
-        # 6. Process and verify results
-        if response.status_code == 200:
-            result = response.json()
-            artifact = result["artifacts"][0]
+        for i, variant in enumerate(selected_variants):
+            # Reset file pointer for each generation
+            resized_img.seek(0)
             
-            # Generate unique output filename
-            timestamp = int(time.time())
-            output_filename = f"modern_{timestamp}_{room_image.filename}"
+            # Generate design
+            artifact = generate_design(resized_img, variant)
+            
+            # Save result
+            output_filename = f"design_{timestamp}_{variant['name'].lower().replace(' ', '_')}_{i}.png"
             output_path = os.path.join("generated", output_filename)
             
-            # Save transformed image
             with open(output_path, "wb") as f:
                 f.write(base64.b64decode(artifact["base64"]))
             
-            # Verify transformation occurred
-            input_hash = file_hash(input_path)
+            # Verify transformation
             output_hash = file_hash(output_path)
-            is_transformed = (input_hash != output_hash)
             
-            return {
-                "success": True,
-                "transformed": is_transformed,
-                "original_size": Image.open(input_path).size,
-                "processed_size": new_size,
-                "output_path": output_path,
-                "prompt_used": enhanced_prompt,
-                "parameters": {
-                    "image_strength": payload["image_strength"],
-                    "steps": payload["steps"],
-                    "cfg_scale": payload["cfg_scale"]
-                }
-            }
-        else:
-            error_msg = response.json().get("message", "Unknown API error")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Stability AI Error: {error_msg}"
-            )
-            
+            results.append({
+                "style": variant["name"],
+                "image_url": f"/generated/{output_filename}",
+                "transformed": (input_hash != output_hash),
+                "seed": artifact["seed"]
+            })
+
+        return {
+            "success": True,
+            "original_size": Image.open(input_path).size,
+            "processed_size": new_size,
+            "designs": results
+        }
+        
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Processing error: {str(e)}"
         )
+
+def file_hash(filepath):
+    """Generate MD5 hash of a file"""
+    with open(filepath, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
