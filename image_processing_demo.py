@@ -20,24 +20,24 @@ from pydantic import BaseModel
 from enum import Enum
 from concurrent.futures import ThreadPoolExecutor
 import math
+from pathlib import Path
 
 
 
 load_dotenv()
 
 app = FastAPI()
+BASE_DIR = Path(__file__).parent.parent  # Goes up one level from fastapi_app/
 
-base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# Define paths
+uploads_path = BASE_DIR / "fastapi_app" / "uploads"
+generated_path = BASE_DIR / "fastapi_app" / "generated"
 
-uploads_path = os.path.join(base_dir, "uploads")
-generated_path = os.path.join(base_dir, "generated")
+# Create folders if they don't exist
+uploads_path.mkdir(parents=True, exist_ok=True)
+generated_path.mkdir(parents=True, exist_ok=True)
 
-
-# # Create folders if they don't exist
-os.makedirs(uploads_path, exist_ok=True)
-os.makedirs(generated_path, exist_ok=True)
-"""app.mount("/static_uploads", StaticFiles(directory="./uploads"), name="static_uploads")
-app.mount("/static_generated", StaticFiles(directory="./generated"), name="static_generated")"""
+# Mount static files
 app.mount("/static_uploads", StaticFiles(directory=uploads_path), name="static_uploads")
 app.mount("/static_generated", StaticFiles(directory=generated_path), name="static_generated")
 
@@ -259,27 +259,30 @@ async def generate_design(
     num_designs: int = Form(1, ge=1, le=6)
 ):
     try:
-        # Ensure upload directory exists
-        os.makedirs("uploads", exist_ok=True)
-        os.makedirs("generated", exist_ok=True)
+        # Use the same paths defined globally
+        from pathlib import Path
 
-        # Save original file with proper extension
+        BASE_DIR = Path(__file__).parent.parent
+        uploads_dir = BASE_DIR / "fastapi_app" / "uploads"
+        generated_dir = BASE_DIR / "fastapi_app" / "generated"
+
+        # Save original file
         file_ext = os.path.splitext(image.filename)[1]
         original_filename = f"original_{uuid.uuid4().hex}{file_ext}"
-        original_path = os.path.join("uploads", original_filename)
-        
+        original_path = uploads_dir / original_filename
+
         with open(original_path, "wb") as f:
             shutil.copyfileobj(image.file, f)
-        
-        # Process image and generate designs
-        image_bytes, _ = await resize_to_allowed_dimensions(original_path)
-        
+
+        # Resize/process image
+        image_bytes, _ = await resize_to_allowed_dimensions(str(original_path))
+
         design_config = {
             "style": design_style,
             "room_type": room_type,
             "building_type": building_type
         }
-        
+
         tasks = [
             generate_design_variation(
                 image_bytes,
@@ -287,27 +290,32 @@ async def generate_design(
                 ai_strength
             ) for _ in range(num_designs)
         ]
-        
+
         results = await asyncio.gather(*tasks)
-        
-        # Save generated designs and collect URLs
+
+        # Save results
         generated_urls = []
         for result in results:
             filename = f"generated_{uuid.uuid4().hex}.png"
-            filepath = os.path.join("generated", filename)
+            filepath = generated_dir / filename
             with open(filepath, "wb") as f:
                 f.write(base64.b64decode(result["base64"]))
             generated_urls.append(f"/static_generated/{filename}")
-        
+            print("Generated Path:", generated_path)
+
+
         return {
+            
             "success": True,
             "original_image": f"/static_uploads/{original_filename}",
             "designs": generated_urls,
             "message": "Designs generated successfully"
+            
         }
-        
+
     except Exception as e:
-        raise HTTPException(500, f"Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+    
     
 # 1) House Angle: only Front, Back
 #exterior 
@@ -489,133 +497,60 @@ async def generate_exterior_design(
     image: UploadFile = File(...),
     house_angle: HouseAngle = Form(...),
     design_style: ExteriorDesignStyle = Form(...),
-    num_designs: int = Form(1, ge=1, le=12),
-    ai_strength: AIStylingStrength = Form("medium")
+    ai_strength: AIStylingStrength = Form("medium"),
+    num_designs: int = Form(1, ge=1, le=12)
 ):
-    """Endpoint for generating exterior home design variations with robust error handling"""
     try:
-        start_time = time.time()
-        
-        # Validate inputs
-        if num_designs < 1 or num_designs > 12:
-            raise HTTPException(
-                status_code=400,
-                detail="Number of designs must be between 1 and 12"
-            )
+        from pathlib import Path
 
-        # Validate image file
-        if not image.content_type.startswith('image/'):
-            raise HTTPException(400, "Uploaded file must be an image")
+        BASE_DIR = Path(__file__).parent.parent
+        uploads_dir = BASE_DIR / "fastapi_app" / "uploads"
+        generated_dir = BASE_DIR / "fastapi_app" / "generated"
 
-        # Save original uploaded file
-        file_ext = os.path.splitext(image.filename)[1].lower()
-        if file_ext not in ['.jpg', '.jpeg', '.png']:
-            raise HTTPException(400, "Only JPG/JPEG/PNG images are supported")
-
+        # Save original file
+        file_ext = os.path.splitext(image.filename)[1]
         original_filename = f"original_{uuid.uuid4().hex}{file_ext}"
-        original_path = os.path.join("uploads", original_filename)
-        
-        try:
-            with open(original_path, "wb") as f:
-                shutil.copyfileobj(image.file, f)
-        except Exception as e:
-            raise HTTPException(500, f"Failed to save uploaded image: {str(e)}")
+        original_path = uploads_dir / original_filename
 
-        # Process image to allowed dimensions
-        try:
-            image_bytes, dimensions = await resize_to_allowed_dimensions(original_path)
-        except Exception as e:
-            raise HTTPException(400, f"Image processing failed: {str(e)}")
+        with open(original_path, "wb") as f:
+            shutil.copyfileobj(image.file, f)
 
-        # Prepare design config
+        # Resize/process image
+        image_bytes, _ = await resize_to_allowed_dimensions(str(original_path))
+
         design_config = {
             "style": design_style.value,
             "angle": house_angle.value,
         }
 
-        # Generate designs with error collection
         tasks = [
             generate_exterior_design_variation(
                 image_bytes,
                 design_config,
                 ai_strength.value
-            )
-            for _ in range(num_designs)
+            ) for _ in range(num_designs)
         ]
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks)
 
-        # Process results with detailed error tracking
-        generated_files = []
-        error_messages = []
-        
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                error_msg = f"Design {i+1} failed: {str(result)}"
-                error_messages.append(error_msg)
-                print(error_msg)
-                continue
-                
-            try:
-                filename = f"generated/{uuid.uuid4().hex}.png"
-                with open(filename, "wb") as f:
-                    f.write(base64.b64decode(result["base64"]))
-                generated_files.append(filename)
-            except Exception as e:
-                error_msg = f"Failed to save design {i+1}: {str(e)}"
-                error_messages.append(error_msg)
-                print(error_msg)
+        # Save results
+        generated_urls = []
+        for result in results:
+            filename = f"generated_{uuid.uuid4().hex}.png"
+            filepath = generated_dir / filename
+            with open(filepath, "wb") as f:
+                f.write(base64.b64decode(result["base64"]))
+            generated_urls.append(f"/static_generated/{filename}")
 
-        # If all failed, provide detailed error information
-        if not generated_files:
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "message": "All design generations failed",
-                    "errors": error_messages,
-                    "suggestions": [
-                        "Try a different input image",
-                        "Reduce the number of designs",
-                        "Try a lower AI strength setting",
-                        "Check the API key and service availability"
-                    ]
-                }
-            )
-
-        response_data = {
+        return {
             "success": True,
-            "generated_count": len(generated_files),
-            "failed_count": len(error_messages),
-            "time_elapsed": round(time.time() - start_time, 2),
-            "original_image": f"/uploads/{original_filename}",
-            "designs": [f"/generated/{os.path.basename(f)}" for f in generated_files],
-            "dimensions": {
-                "width": dimensions[0],
-                "height": dimensions[1]
-            }
+            "original_image": f"/static_uploads/{original_filename}",
+            "designs": generated_urls,
+            "message": "Designs generated successfully"
         }
 
-        # Include warnings if some generations failed
-        if error_messages:
-            response_data["warnings"] = error_messages[:5]  # Limit to 5 messages
-
-        return JSONResponse(response_data)
-
-    except HTTPException as he:
-        raise he
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "message": "Unexpected error during processing",
-                "error": str(e),
-                "suggestions": [
-                    "Check the input parameters",
-                    "Try again later",
-                    "Contact support if the problem persists"
-                ]
-            }
-        )
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 #out door 
 class OutdoorSpaceType(str, Enum):
@@ -801,63 +736,65 @@ async def generate_outdoor_design(
     num_designs: int = Form(1, ge=1, le=12)
 ):
     try:
-        start_time = time.time()
-        
-        if num_designs < 1 or num_designs > 12:
-            raise HTTPException(400, "Number of designs must be 1-12")
-            
+        # Use consistent base directory paths
+        from pathlib import Path
+        import uuid, os, shutil, base64, time
+
+        BASE_DIR = Path(__file__).parent.parent
+        uploads_dir = BASE_DIR / "fastapi_app" / "uploads"
+        generated_dir = BASE_DIR / "fastapi_app" / "generated"
+
         # Save original uploaded file
-        original_filename = f"original_{uuid.uuid4().hex}{os.path.splitext(image.filename)[1]}"
-        original_path = os.path.join("uploads", original_filename)
-        
+        file_ext = os.path.splitext(image.filename)[1]
+        original_filename = f"original_{uuid.uuid4().hex}{file_ext}"
+        original_path = uploads_dir / original_filename
+
         with open(original_path, "wb") as f:
             shutil.copyfileobj(image.file, f)
-        
-        # Process image
-        image_bytes, _ = await resize_to_allowed_dimensions(original_path)
-        
-        # Prepare config
+
+        # Resize/process image
+        image_bytes, _ = await resize_to_allowed_dimensions(str(original_path))
+
+        # Prepare config for outdoor design
         design_config = {
             "style": design_style.value,
             "space_type": space_type.value,
         }
-        
-        # Generate designs using the outdoor-specific function
+
+        # Generate design variations
         tasks = [
             generate_outdoor_design_variation(
                 image_bytes,
                 design_config,
                 ai_strength.value
-            )
-            for _ in range(num_designs)
+            ) for _ in range(num_designs)
         ]
-        
-        results = await asyncio.gather(*tasks)
-        
-        # Save results
-        generated_files = []
-        for result in results:
-            filename = f"generated/{uuid.uuid4().hex}.png"
-            with open(filename, "wb") as f:
-                f.write(base64.b64decode(result["base64"]))
-            generated_files.append(filename)
 
-        
-        
-        return JSONResponse({
+        results = await asyncio.gather(*tasks)
+
+        # Save generated images and build URLs
+        generated_urls = []
+        for result in results:
+            filename = f"generated_{uuid.uuid4().hex}.png"
+            filepath = generated_dir / filename
+            with open(filepath, "wb") as f:
+                f.write(base64.b64decode(result["base64"]))
+            generated_urls.append(f"/static_generated/{filename}")
+
+        return {
             "success": True,
-            "time_elapsed": round(time.time() - start_time, 2),
-            "original_image": f"/uploads/{original_filename}",
-            "designs": [f"/generated/{os.path.basename(f)}" for f in generated_files],
+            "original_image": f"/static_uploads/{original_filename}",
+            "designs": generated_urls,
             "metadata": {
                 "space_type": space_type.value,
                 "design_style": design_style.value,
                 "num_designs": num_designs,
                 "styling_strength": ai_strength.value
-            }
-        })
-        
+            },
+            "message": "Outdoor designs generated successfully"
+        }
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
